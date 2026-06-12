@@ -1,0 +1,19 @@
+{
+  "name": "twitch-relay",
+  "version": "0.1.0",
+  "description": "可重用的 input → Twitch 聊天室播報框架",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "auth": "node src/cli.js auth",
+    "start": "node src/cli.js run"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

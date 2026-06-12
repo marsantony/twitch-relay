@@ -1,0 +1,8 @@
+{
+  "source": { "type": "espn", "league": "fifa.world", "pollIntervalSec": 20 },
+  "format": {
+    "type": "soccer-zh",
+    "events": ["goal", "card", "kickoff", "halftime", "secondhalf", "fulltime"]
+  },
+  "sink": { "type": "twitch-chat", "channel": "" }
+}
