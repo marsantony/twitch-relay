@@ -1,26 +1,21 @@
 import { describe, it, expect } from "vitest";
 import { createTwitchChatSink, translateDropReason } from "../src/sinks/twitch-chat.js";
 
-const TOKENS = { clientId: "cid", accessToken: "at1", refreshToken: "rt1" };
-
-function fakeDeps({ tokens = TOKENS, helix = {}, refresh, writeResult = { ok: true } } = {}) {
-  const written = [];
+// 假的 token-manager：直接以固定 token 執行 fn，clientId 固定
+function fakeTokenManager() {
   return {
-    written,
-    readTokens: async () => ({ ok: true, value: tokens }),
-    writeTokens: async (t) => {
-      written.push(t);
-      return writeResult;
-    },
-    refreshTokens:
-      refresh ??
-      (async () => ({ accessToken: "at2", refreshToken: "rt2", scopes: [], expiresIn: 14400 })),
-    helix: {
-      validateToken: async () => ({ login: "mars", userId: "111" }),
-      getUser: async ({ login }) => ({ id: "999", login, displayName: login }),
-      sendChatMessage: async () => ({ isSent: true, dropReason: null }),
-      ...helix,
-    },
+    load: async () => {},
+    clientId: "cid",
+    withAuth: async (fn) => fn("at1"),
+  };
+}
+
+function fakeHelix(overrides = {}) {
+  return {
+    validateToken: async () => ({ login: "mars", userId: "111" }),
+    getUser: async ({ login }) => ({ id: `id-${login}`, login, displayName: login }),
+    sendChatMessage: async () => ({ isSent: true, dropReason: null }),
+    ...overrides,
   };
 }
 
@@ -31,10 +26,8 @@ describe("translateDropReason", () => {
     expect(r).toContain("dup");
   });
 
-  it("未知 code → 原樣輸出，不丟資訊", () => {
-    expect(translateDropReason({ code: "channel_settings", message: "x" })).toContain(
-      "channel_settings",
-    );
+  it("未知 code → 原樣輸出", () => {
+    expect(translateDropReason({ code: "weird", message: "x" })).toContain("weird");
   });
 
   it("無 dropReason → 原因不明", () => {
@@ -42,106 +35,92 @@ describe("translateDropReason", () => {
   });
 });
 
-describe("createTwitchChatSink", () => {
-  it("init：channel 留空 → broadcaster 即本人", async () => {
-    const deps = fakeDeps();
-    const sink = createTwitchChatSink({ channel: "", ...deps });
-    const ids = await sink.init();
-    expect(ids).toEqual({ broadcasterId: "111", senderId: "111", login: "mars" });
+describe("createTwitchChatSink fan-out", () => {
+  it("沒有頻道 → init 報錯", async () => {
+    const sink = createTwitchChatSink({
+      channels: [],
+      tokenManager: fakeTokenManager(),
+      helix: fakeHelix(),
+    });
+    await expect(sink.init()).rejects.toThrow(/channels add|--channel/);
   });
 
-  it("init：指定別人頻道 → 解析 broadcaster id", async () => {
-    const deps = fakeDeps();
-    const sink = createTwitchChatSink({ channel: "someone", ...deps });
-    const ids = await sink.init();
-    expect(ids.broadcasterId).toBe("999");
-    expect(ids.senderId).toBe("111");
-  });
-
-  it("沒有 token 檔 → init 給出可動作的錯誤", async () => {
-    const deps = fakeDeps();
-    deps.readTokens = async () => ({ ok: true, value: null });
-    const sink = createTwitchChatSink({ ...deps });
-    await expect(sink.init()).rejects.toThrow(/auth/);
-  });
-
-  it("send 成功 → { status: 'sent' }", async () => {
-    const deps = fakeDeps();
-    const sink = createTwitchChatSink({ ...deps });
-    await sink.init();
-    expect(await sink.send("hi")).toEqual({ status: "sent" });
-  });
-
-  it("HTTP 200 但 is_sent false → dropped 帶翻譯後原因（不可默默當成功）", async () => {
-    const deps = fakeDeps({
-      helix: {
-        sendChatMessage: async () => ({
-          isSent: false,
-          dropReason: { code: "msg_rejected", message: "AutoMod" },
-        }),
+  it("init：缺 id 的頻道用 getUser 解析；有 id 的不重查", async () => {
+    let getUserCalls = 0;
+    const helix = fakeHelix({
+      getUser: async ({ login }) => {
+        getUserCalls++;
+        return { id: `id-${login}`, login, displayName: login };
       },
     });
-    const sink = createTwitchChatSink({ ...deps });
-    await sink.init();
-    const r = await sink.send("hi");
-    expect(r.status).toBe("dropped");
-    expect(r.reason).toContain("AutoMod");
+    const sink = createTwitchChatSink({
+      channels: [{ login: "alice" }, { login: "bob", id: "222" }],
+      tokenManager: fakeTokenManager(),
+      helix,
+    });
+    const info = await sink.init();
+    expect(info.login).toBe("mars");
+    expect(info.channels).toEqual(["alice", "bob"]);
+    expect(getUserCalls).toBe(1); // 只解析缺 id 的 alice
   });
 
-  it("401 → refresh → 用新 token 重送成功，且新 token 已落地", async () => {
-    const sends = [];
-    const deps = fakeDeps({
-      helix: {
-        sendChatMessage: async ({ token }) => {
-          sends.push(token);
-          if (sends.length === 1) {
-            throw Object.assign(new Error("401"), { status: 401 });
-          }
-          return { isSent: true, dropReason: null };
-        },
+  it("send：一則訊息 fan-out 到所有頻道，各自回結果", async () => {
+    const sent = [];
+    const helix = fakeHelix({
+      sendChatMessage: async ({ broadcasterId }) => {
+        sent.push(broadcasterId);
+        return { isSent: true, dropReason: null };
       },
     });
-    const sink = createTwitchChatSink({ ...deps });
+    const sink = createTwitchChatSink({
+      channels: [{ login: "alice", id: "111" }, { login: "bob", id: "222" }],
+      tokenManager: fakeTokenManager(),
+      helix,
+    });
     await sink.init();
-    const r = await sink.send("hi");
-    expect(r).toEqual({ status: "sent" });
-    expect(sends).toEqual(["at1", "at2"]);
-    expect(deps.written.at(-1).refreshToken).toBe("rt2"); // refresh token 已輪換落地
+    const { results } = await sink.send("hi");
+    expect(results).toEqual([
+      { channel: "alice", status: "sent" },
+      { channel: "bob", status: "sent" },
+    ]);
+    expect(sent.sort()).toEqual(["111", "222"]);
   });
 
-  it("refresh 成功但寫檔失敗 → failed 且提示重新授權（refresh token 已被消耗）", async () => {
-    const deps = fakeDeps({
-      helix: {
-        sendChatMessage: async () => {
-          throw Object.assign(new Error("401"), { status: 401 });
-        },
-      },
-      writeResult: { ok: false, error: "磁碟唯讀" },
+  it("某頻道 dropped（is_sent:false）不影響其他頻道", async () => {
+    const helix = fakeHelix({
+      sendChatMessage: async ({ broadcasterId }) =>
+        broadcasterId === "111"
+          ? { isSent: false, dropReason: { code: "msg_rejected", message: "AutoMod" } }
+          : { isSent: true, dropReason: null },
     });
-    const sink = createTwitchChatSink({ ...deps });
+    const sink = createTwitchChatSink({
+      channels: [{ login: "alice", id: "111" }, { login: "bob", id: "222" }],
+      tokenManager: fakeTokenManager(),
+      helix,
+    });
     await sink.init();
-    const r = await sink.send("hi");
-    expect(r.status).toBe("failed");
-    expect(r.error).toContain("重新執行 auth");
+    const { results } = await sink.send("hi");
+    expect(results[0]).toMatchObject({ channel: "alice", status: "dropped" });
+    expect(results[0].reason).toContain("AutoMod");
+    expect(results[1]).toEqual({ channel: "bob", status: "sent" });
   });
 
-  it("非 401 錯誤 → failed，不觸發 refresh", async () => {
-    let refreshed = false;
-    const deps = fakeDeps({
-      helix: {
-        sendChatMessage: async () => {
-          throw Object.assign(new Error("500 內部錯誤"), { status: 500 });
-        },
-      },
-      refresh: async () => {
-        refreshed = true;
-        return {};
+  it("某頻道 send 丟例外 → 該頻道 failed，其他正常", async () => {
+    const helix = fakeHelix({
+      sendChatMessage: async ({ broadcasterId }) => {
+        if (broadcasterId === "111") throw new Error("500 內部錯誤");
+        return { isSent: true, dropReason: null };
       },
     });
-    const sink = createTwitchChatSink({ ...deps });
+    const sink = createTwitchChatSink({
+      channels: [{ login: "alice", id: "111" }, { login: "bob", id: "222" }],
+      tokenManager: fakeTokenManager(),
+      helix,
+    });
     await sink.init();
-    const r = await sink.send("hi");
-    expect(r.status).toBe("failed");
-    expect(refreshed).toBe(false);
+    const { results } = await sink.send("hi");
+    expect(results[0]).toMatchObject({ channel: "alice", status: "failed" });
+    expect(results[0].error).toContain("500");
+    expect(results[1].status).toBe("sent");
   });
 });

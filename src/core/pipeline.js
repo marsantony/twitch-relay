@@ -1,4 +1,4 @@
-// poll loop：source → diff → format → sink → state 落地。
+// poll loop：source → diff → format → sink（fan-out 至多頻道）→ 累積統計 → state 一次落地。
 // source 失敗 exponential backoff（上限 5 分鐘）；sink 失敗計入統計並醒目輸出，
 // 完場時印統計——長跑無人盯 console 時至少有一個總結可回查。
 import { diffSnapshot } from "./diff.js";
@@ -39,16 +39,19 @@ export function createPipeline({
       }
       const message = formatEvent(ev);
       if (!message) continue;
-      const result = await sink.send(message);
-      if (result.status === "sent") {
-        stats.sent++;
-        logger.info(`已播報：${message}`);
-      } else if (result.status === "dropped") {
-        stats.dropped++;
-        logger.warn(`訊息被擋（${result.reason}）：${message}`);
-      } else {
-        stats.failed++;
-        logger.error(`發話失敗（${result.error}）：${message}`);
+      // fan-out 到多頻道，逐頻道計數（某頻道失敗不影響其他）
+      const { results } = await sink.send(message);
+      for (const r of results) {
+        if (r.status === "sent") {
+          stats.sent++;
+          logger.info(`已播報 → ${r.channel}：${message}`);
+        } else if (r.status === "dropped") {
+          stats.dropped++;
+          logger.warn(`[${r.channel}] 訊息被擋（${r.reason}）：${message}`);
+        } else {
+          stats.failed++;
+          logger.error(`[${r.channel}] 發話失敗（${r.error}）：${message}`);
+        }
       }
     }
 

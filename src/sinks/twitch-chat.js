@@ -1,12 +1,9 @@
-// Twitch 聊天室 sink。send() 回三態：
-// { status: "sent" } / { status: "dropped", reason } / { status: "failed", error }
-// HTTP 200 不等於發成功——必須檢查 is_sent / drop_reason，這是最容易被吃掉的失敗路徑。
+// Twitch 聊天室 sink（多頻道 fan-out）。一則訊息送到所有頻道，各頻道獨立、互不影響。
+// send() 回 { results: [{ channel, status, reason?/error? }] }；status:
+//   "sent" / "dropped"（HTTP 200 但 is_sent:false）/ "failed"（HTTP 層錯誤）
+// HTTP 200 不等於發成功——必檢 is_sent / drop_reason，這是最容易被吃掉的失敗路徑。
 import * as helixDefault from "../twitch/helix.js";
-import { refreshTokens as refreshTokensDefault } from "../auth/dcf.js";
-import {
-  readTokens as readTokensDefault,
-  writeTokens as writeTokensDefault,
-} from "../auth/token-store.js";
+import { createTokenManager } from "../auth/token-manager.js";
 
 // drop_reason code → 可動作中文 hint（概念沿用 TwitchSelfReply 的 translateIrcError）
 const DROP_HINTS = [
@@ -33,78 +30,60 @@ export function translateDropReason(dropReason) {
   return `${hit ? hit[1] : code}${detail}`;
 }
 
+/**
+ * @param channels 要播報的頻道清單 [{ login, id }]（id 可選；缺則 init 時用 getUser 補）
+ */
 export function createTwitchChatSink({
-  channel,
+  channels = [],
   tokenPath,
   helix = helixDefault,
-  refreshTokens = refreshTokensDefault,
-  readTokens = readTokensDefault,
-  writeTokens = writeTokensDefault,
+  tokenManager = createTokenManager({ tokenPath }),
 } = {}) {
-  let auth = null; // token 檔內容（記憶體副本，refresh 後同步更新）
-  let ids = null; // { broadcasterId, senderId, login }
+  let senderId = null;
+  let targets = null; // [{ login, id }]，id 已解析
 
-  async function loadAuth() {
-    const r = await readTokens(tokenPath);
-    if (!r.ok) throw new Error(r.error);
-    if (!r.value) {
-      throw new Error("找不到 token 檔，請先執行：node src/cli.js auth --client-id <id>");
-    }
-    return r.value;
-  }
-
-  async function refreshAndPersist() {
-    const fresh = await refreshTokens({ clientId: auth.clientId, refreshToken: auth.refreshToken });
-    const next = { ...auth, accessToken: fresh.accessToken, refreshToken: fresh.refreshToken };
-    const w = await writeTokens(next, tokenPath);
-    if (!w.ok) {
-      // 舊 refresh token 已被消耗、新 token 沒落地 → 下次啟動必死，現在就 fail loud
-      throw new Error(`refresh 成功但 token 檔寫入失敗（${w.error}），請重新執行 auth`);
-    }
-    auth = next;
-  }
-
-  async function withAuth(fn) {
-    try {
-      return await fn(auth.accessToken);
-    } catch (err) {
-      if (err?.status !== 401) throw err;
-      await refreshAndPersist();
-      return await fn(auth.accessToken);
-    }
+  async function resolveId(channel) {
+    if (channel.id) return channel;
+    const user = await tokenManager.withAuth((token) =>
+      helix.getUser({ login: channel.login, token, clientId: tokenManager.clientId }),
+    );
+    if (!user) throw new Error(`找不到頻道：${channel.login}`);
+    return { login: user.login, id: user.id };
   }
 
   async function init() {
-    auth = await loadAuth();
-    const self = await withAuth((token) => helix.validateToken({ token }));
-    let broadcasterId = self.userId;
-    if (channel && channel.toLowerCase() !== self.login.toLowerCase()) {
-      const user = await withAuth((token) =>
-        helix.getUser({ login: channel, token, clientId: auth.clientId }),
-      );
-      if (!user) throw new Error(`找不到頻道：${channel}`);
-      broadcasterId = user.id;
+    await tokenManager.load();
+    const self = await tokenManager.withAuth((token) => helix.validateToken({ token }));
+    senderId = self.userId;
+    if (channels.length === 0) {
+      throw new Error("沒有要播報的頻道，請先 channels add <name> 或用 --channel");
     }
-    ids = { broadcasterId, senderId: self.userId, login: self.login };
-    return ids;
+    targets = await Promise.all(channels.map(resolveId)); // 並發解析各頻道 id
+    return { login: self.login, senderId, channels: targets.map((t) => t.login) };
   }
 
-  async function send(message) {
+  async function sendToOne(target, message) {
     try {
-      const result = await withAuth((token) =>
+      const result = await tokenManager.withAuth((token) =>
         helix.sendChatMessage({
-          broadcasterId: ids.broadcasterId,
-          senderId: ids.senderId,
+          broadcasterId: target.id,
+          senderId,
           message,
           token,
-          clientId: auth.clientId,
+          clientId: tokenManager.clientId,
         }),
       );
-      if (result.isSent) return { status: "sent" };
-      return { status: "dropped", reason: translateDropReason(result.dropReason) };
+      if (result.isSent) return { channel: target.login, status: "sent" };
+      return { channel: target.login, status: "dropped", reason: translateDropReason(result.dropReason) };
     } catch (err) {
-      return { status: "failed", error: String(err?.message ?? err) };
+      return { channel: target.login, status: "failed", error: String(err?.message ?? err) };
     }
+  }
+
+  // fan-out 到所有頻道；某頻道失敗不影響其他。回各頻道結果。
+  async function send(message) {
+    const results = await Promise.all(targets.map((t) => sendToOne(t, message)));
+    return { results };
   }
 
   return { init, send };

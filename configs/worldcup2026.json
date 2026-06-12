@@ -4,5 +4,5 @@
     "type": "soccer-zh",
     "events": ["goal", "card", "kickoff", "halftime", "secondhalf", "fulltime"]
   },
-  "sink": { "type": "twitch-chat", "channel": "" }
+  "sink": { "type": "twitch-chat" }
 }

@@ -48,10 +48,12 @@ function fakeWorld({ snapshots, sendResults }) {
     getSaved: () => saved,
     source: { fetchSnapshot: async () => snapshots.shift() },
     sink: {
-      init: async () => ({}),
+      init: async () => ({ login: "mars", channels: ["ch"] }),
       send: async (message) => {
         sentMessages.push(message);
-        return sendResults?.shift() ?? { status: "sent" };
+        // 預設單頻道 sent；sendResults 給 per-channel 結果陣列
+        const results = sendResults?.shift() ?? [{ channel: "ch", status: "sent" }];
+        return { results };
       },
     },
     saveState: async (state) => {
@@ -115,8 +117,8 @@ describe("pipeline tick", () => {
         },
       ],
       sendResults: [
-        { status: "dropped", reason: "重複訊息" },
-        { status: "failed", error: "500" },
+        [{ channel: "ch", status: "dropped", reason: "重複訊息" }],
+        [{ channel: "ch", status: "failed", error: "500" }],
       ],
     });
     const pipeline = createPipeline({

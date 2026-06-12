@@ -1,10 +1,19 @@
 #!/usr/bin/env node
 // twitch-relay CLI：
-//   auth --client-id <id>                     一次性 DCF 授權（Public client，不需 secret）
-//   run --config <path> [--dry-run] [--state <path>]   啟動播報 pipeline
+//   auth --client-id <id>                          一次性 DCF 授權（Public client，不需 secret）
+//   channels list|add|remove [<login>] --config <path>   管理播報頻道（存在 repo 外）
+//   run --config <path> [--dry-run] [--channel <login>]… [--state <path>]   啟動播報
 import { readFile } from "node:fs/promises";
 import { requestDeviceCode, pollForToken } from "./auth/dcf.js";
 import { writeTokens, defaultTokenPath } from "./auth/token-store.js";
+import { createTokenManager } from "./auth/token-manager.js";
+import { getUser } from "./twitch/helix.js";
+import {
+  channelsFileFor,
+  loadChannels,
+  addChannel,
+  removeChannel,
+} from "./channels/store.js";
 import { createEspnSource } from "./sources/espn.js";
 import { createFormatter } from "./format/soccer-zh.js";
 import { createTwitchChatSink } from "./sinks/twitch-chat.js";
@@ -17,20 +26,37 @@ const SCOPES = ["user:write:chat"];
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
+  const positionals = [];
   const flags = {};
   for (let i = 0; i < rest.length; i++) {
-    if (rest[i] === "--dry-run") flags.dryRun = true;
-    else if (rest[i].startsWith("--")) {
+    const tok = rest[i];
+    if (tok === "--dry-run") {
+      flags.dryRun = true;
+    } else if (tok.startsWith("--")) {
       const value = rest[i + 1];
       if (value === undefined || value.startsWith("--")) {
-        throw new Error(`${rest[i]} 缺少對應的值`);
+        throw new Error(`${tok} 缺少對應的值`);
       }
-      const key = rest[i].slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
-      flags[key] = value;
+      const key = tok.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+      flags[key] = key in flags ? [].concat(flags[key], value) : value; // 可重複 → 陣列
       i++;
+    } else {
+      positionals.push(tok);
     }
   }
-  return { command, flags };
+  return { command, positionals, flags };
+}
+
+function dedupeByLogin(channels) {
+  const seen = new Set();
+  const out = [];
+  for (const c of channels) {
+    const key = c.login.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(c);
+  }
+  return out;
 }
 
 async function cmdAuth({ clientId }) {
@@ -53,23 +79,66 @@ async function cmdAuth({ clientId }) {
   logger.info(`授權完成，token 已存到 ${defaultTokenPath()}`);
 }
 
+async function cmdChannels({ positionals, config }) {
+  if (!config) throw new Error("請提供 --config <path>");
+  const logger = createLogger();
+  const [sub, login] = positionals;
+  const file = channelsFileFor(config);
+
+  if (sub === "list") {
+    const r = await loadChannels(file);
+    if (!r.ok) throw new Error(r.error);
+    if (r.value.length === 0) logger.info("（尚無頻道）");
+    else r.value.forEach((c) => logger.info(`- ${c.login}`));
+    return;
+  }
+  if (sub === "add") {
+    if (!login) throw new Error("用法：channels add <login> --config <path>");
+    const tm = createTokenManager({});
+    await tm.load();
+    const user = await tm.withAuth((token) => getUser({ login, token, clientId: tm.clientId }));
+    if (!user) throw new Error(`找不到頻道：${login}（請確認帳號拼寫）`);
+    const r = await addChannel({ login: user.login, id: user.id }, file);
+    if (!r.ok) throw new Error(r.error);
+    logger.info(r.already ? `頻道已在清單：${user.login}` : `已新增頻道：${user.login}`);
+    return;
+  }
+  if (sub === "remove") {
+    if (!login) throw new Error("用法：channels remove <login> --config <path>");
+    const r = await removeChannel(login, file);
+    if (!r.ok) throw new Error(r.error);
+    logger.info(r.missing ? `頻道不在清單：${login}` : `已移除頻道：${login}`);
+    return;
+  }
+  throw new Error("用法：channels list|add|remove [<login>] --config <path>");
+}
+
 function createSource(cfg = {}) {
   if (cfg.type === "espn") return createEspnSource({ league: cfg.league });
   throw new Error(`未知的 source type：${cfg.type}`);
 }
 
-async function cmdRun({ config: configPath, dryRun, state: stateOverride }) {
+async function cmdRun({ config: configPath, dryRun, channel, state: stateOverride }) {
   if (!configPath) throw new Error("請提供 --config <path>");
   const logger = createLogger();
   const config = JSON.parse(await readFile(configPath, "utf8"));
 
+  // 頻道 = store + --channel flag（合併去重）；空則報錯，不隱式發到自己台
+  const stored = await loadChannels(channelsFileFor(configPath));
+  if (!stored.ok) throw new Error(stored.error);
+  const flagChannels = [].concat(channel ?? []).map((login) => ({ login }));
+  const channels = dedupeByLogin([...stored.value, ...flagChannels]);
+  if (channels.length === 0) {
+    throw new Error("尚未設定頻道，請先 channels add <name> 或用 --channel <name>");
+  }
+
   const source = createSource(config.source);
   const formatEvent = createFormatter(config.format);
   const sink = dryRun
-    ? createConsoleSink({ logger })
-    : createTwitchChatSink({ channel: config.sink?.channel });
-  const ids = await sink.init();
-  if (!dryRun) logger.info(`將以 ${ids.login} 身分發話到頻道 ID ${ids.broadcasterId}`);
+    ? createConsoleSink({ logger, channels })
+    : createTwitchChatSink({ channels });
+  const info = await sink.init();
+  logger.info(`將以 ${info.login} 身分播報到：${info.channels.join(", ")}`);
 
   // 啟動提醒：印出本日賽程，順便驗證 source 可用
   const first = await source.fetchSnapshot();
@@ -101,13 +170,16 @@ async function cmdRun({ config: configPath, dryRun, state: stateOverride }) {
   await pipeline.run({});
 }
 
-const { command, flags } = parseArgs(process.argv.slice(2));
+const { command, positionals, flags } = parseArgs(process.argv.slice(2));
 try {
   if (command === "auth") await cmdAuth(flags);
+  else if (command === "channels") await cmdChannels({ positionals, ...flags });
   else if (command === "run") await cmdRun(flags);
   else {
-    console.log("用法：node src/cli.js auth --client-id <id>");
-    console.log("　　　node src/cli.js run --config configs/worldcup2026.json [--dry-run] [--state <path>]");
+    console.log("用法：");
+    console.log("  node src/cli.js auth --client-id <id>");
+    console.log("  node src/cli.js channels list|add|remove [<login>] --config <path>");
+    console.log("  node src/cli.js run --config <path> [--dry-run] [--channel <login>]… [--state <path>]");
     process.exitCode = command ? 1 : 0;
   }
 } catch (err) {

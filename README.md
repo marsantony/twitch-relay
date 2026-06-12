@@ -36,15 +36,30 @@ node src/cli.js auth --client-id <你的 client id>
 依提示在瀏覽器輸入代碼完成授權。token 存到 `~/.config/twitch-relay/token.json`
 （權限 600，不在 repo 內），之後過期會自動 refresh。
 
-### 3. 執行
+### 3. 設定播報頻道
+
+頻道清單存在 repo 外（`~/.config/twitch-relay/channels-<config 名>.json`），用 CLI 管理。
+`add` 會即時驗證頻道存在（打錯字當場擋下）：
 
 ```bash
-# 先 dry-run：訊息只印到 console，不發任何聊天訊息
+node src/cli.js channels add  <你的帳號>  --config configs/worldcup2026.json
+node src/cli.js channels add  <別人的頻道> --config configs/worldcup2026.json
+node src/cli.js channels list             --config configs/worldcup2026.json
+node src/cli.js channels remove <頻道>     --config configs/worldcup2026.json
+```
+
+### 4. 執行
+
+```bash
+# 先 dry-run：訊息只印到 console，不發任何聊天訊息（可用 --channel 臨時指定頻道）
 node src/cli.js run --config configs/worldcup2026.json --dry-run
 
-# 確認沒問題後正式播報
+# 確認沒問題後正式播報（會 fan-out 到所有已設定頻道）
 node src/cli.js run --config configs/worldcup2026.json
 ```
+
+`run` 至少要有一個頻道（來自 store 或 `--channel <login>`，可重複），否則直接報錯——
+不會隱式發到你自己的台。一則事件會同時送到所有頻道，**某頻道失敗不影響其他頻道**。
 
 ## Config
 
@@ -56,12 +71,12 @@ node src/cli.js run --config configs/worldcup2026.json
     // 可選：goal, card, kickoff, halftime, secondhalf, fulltime
     "events": ["goal", "card", "kickoff", "halftime", "secondhalf", "fulltime"]
   },
-  "sink": { "type": "twitch-chat", "channel": "" } // 留空 = 發到自己的頻道
+  "sink": { "type": "twitch-chat" } // 頻道不寫在 config，用 channels 指令管理
 }
 ```
 
-state（已播報事件、比賽狀態）存 `~/.config/twitch-relay/state-<config 名>.json`，
-重啟不會重複播報；dry-run 也會寫入，轉正式跑時不洗版。
+state（已播報事件、比賽狀態）與頻道清單都存 `~/.config/twitch-relay/`（per-config，不進 repo）。
+重啟不會重複播報；dry-run 也會寫 state，轉正式跑時不洗版。
 
 ## 技術棧
 
@@ -77,3 +92,5 @@ state（已播報事件、比賽狀態）存 `~/.config/twitch-relay/state-<conf
   發生時只需修 `src/sources/espn.js`，其他層不受影響
 - refresh token 為一次性，token 檔採原子寫入；若看到「請重新執行 auth」，
   跑一次 `auth` 指令即可
+- **多 pipeline 共用同一帳號**（例如世足 + 英超兩個 config 同時跑）時，token refresh
+  以 process 內 single-flight + 跨 process retry-with-re-read 處理競爭，無需上鎖、無新失敗模式
