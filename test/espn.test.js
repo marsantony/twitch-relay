@@ -66,13 +66,42 @@ describe("normalizeScoreboard", () => {
     expect(card.yellowCard).toBe(true);
   });
 
-  it("事件 key 含比賽、類型、時間、球員（ESPN 無事件 id，合成去重 key）", () => {
+  it("事件 key = 比賽:類別:分鐘:球員（用穩定欄位，不用會被修訂的秒數/typeId）", () => {
     const snap = normalizeScoreboard(RAW);
-    expect(snap.matches[0].events[0].key).toBe("1001:137:1973:366781");
+    // 進球：category=goal、分鐘 33'、球員 366781（不含 typeId 137、不含秒數 1973）
+    expect(snap.matches[0].events[0].key).toBe("1001:goal:33':366781");
+    // 黃牌：category=yellow
+    expect(snap.matches[0].events[1].key).toBe("1001:yellow:45'+3':328466");
   });
 
-  it("缺 athletesInvolved 時 key 用 na 佔位", () => {
-    expect(eventKey("1", { type: { id: "94" }, clock: { value: 100 } })).toBe("1:94:100:na");
+  it("秒數被 ESPN 修訂但分鐘不變 → key 不變（修正重播 bug 的核心）", () => {
+    const goalAtSec = (sec) => ({
+      type: { id: "70" },
+      clock: { value: sec, displayValue: "21'" },
+      scoringPlay: true,
+      athletesInvolved: [{ id: "317285" }],
+    });
+    expect(eventKey("m", goalAtSec(1230))).toBe(eventKey("m", goalAtSec(1244)));
+  });
+
+  it("進球被重新分類 Goal↔Goal-Header → key 不變（category 取代 typeId）", () => {
+    const base = { clock: { displayValue: "38'" }, scoringPlay: true, athletesInvolved: [{ id: "286828" }] };
+    const asGoal = eventKey("m", { ...base, type: { id: "70" } });
+    const asHeader = eventKey("m", { ...base, type: { id: "137" } });
+    expect(asGoal).toBe(asHeader);
+  });
+
+  it("同球員不同分鐘（梅開二度）→ 不同 key（不會誤刪第二球）", () => {
+    const goalAt = (min) => ({
+      clock: { displayValue: min },
+      scoringPlay: true,
+      athletesInvolved: [{ id: "999" }],
+    });
+    expect(eventKey("m", goalAt("21'"))).not.toBe(eventKey("m", goalAt("67'")));
+  });
+
+  it("缺 athletesInvolved / clock 時 fallback 不丟例外", () => {
+    expect(eventKey("1", { yellowCard: true })).toBe("1:yellow:?:na");
   });
 
   it("空 scoreboard → 空 matches", () => {

@@ -21,10 +21,19 @@ export function dateRange(now, backDays = 1, fwdDays = 1) {
   return `${dateStr(start)}-${dateStr(end)}`;
 }
 
-// ESPN 的 details 事件沒有 id，自行合成去重 key
+// ESPN 的 details 事件沒有 id，自行合成去重 key。
+// 只用「ESPN 不會回頭修訂」的欄位當身分：分鐘顯示 + 事件類別 + 球員。
+// 不用 clock.value（秒數會被 ESPN 修訂，曾造成同一進球重播）、
+// 也不用 type.id（Goal 70 ↔ Goal-Header 137 會被重新分類，同樣會變 key）。
 export function eventKey(matchId, detail) {
   const athleteId = detail.athletesInvolved?.[0]?.id ?? "na";
-  return `${matchId}:${detail.type?.id}:${detail.clock?.value}:${athleteId}`;
+  const minute = detail.clock?.displayValue ?? "?";
+  let category;
+  if (detail.scoringPlay) category = "goal";
+  else if (detail.redCard) category = "red";
+  else if (detail.yellowCard) category = "yellow";
+  else category = detail.type?.id ?? "other"; // 其他類型（換人等）沿用 typeId
+  return `${matchId}:${category}:${minute}:${athleteId}`;
 }
 
 export function normalizeScoreboard(raw) {
