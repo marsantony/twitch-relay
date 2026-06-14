@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { normalizeScoreboard, createEspnSource, eventKey } from "../src/sources/espn.js";
+import {
+  normalizeScoreboard,
+  createEspnSource,
+  eventKey,
+  dateStr,
+  dateRange,
+} from "../src/sources/espn.js";
 import { jsonResponse, sequenceFetch } from "./helpers.js";
 
 // 依 2026-06-12 對 ESPN 實測的回應結構縮減而成（見 tasks/research.md）
@@ -74,14 +80,33 @@ describe("normalizeScoreboard", () => {
   });
 });
 
+describe("日期範圍（ESPN 預設 scoreboard 釘在過期日期的修正）", () => {
+  it("dateStr 補零", () => {
+    expect(dateStr(new Date(2026, 5, 14))).toBe("20260614"); // 月份 0-based，5=六月
+    expect(dateStr(new Date(2026, 0, 3))).toBe("20260103");
+  });
+
+  it("dateRange 預設 ±1 天，給出 <昨>-<明>", () => {
+    expect(dateRange(new Date(2026, 5, 14))).toBe("20260613-20260615");
+  });
+
+  it("dateRange 跨月正確進位", () => {
+    expect(dateRange(new Date(2026, 6, 1))).toBe("20260630-20260702"); // 6/30 - 7/2
+    expect(dateRange(new Date(2026, 0, 1))).toBe("20251231-20260102"); // 跨年
+  });
+});
+
 describe("createEspnSource", () => {
-  it("成功 → ok + snapshot", async () => {
+  const FIXED_NOW = () => new Date(2026, 5, 14);
+
+  it("成功 → ok + snapshot，URL 帶滾動日期範圍", async () => {
     const fetchImpl = sequenceFetch([jsonResponse(200, RAW)]);
-    const source = createEspnSource({ league: "fifa.world", fetchImpl });
+    const source = createEspnSource({ league: "fifa.world", fetchImpl, now: FIXED_NOW });
     const r = await source.fetchSnapshot();
     expect(r.ok).toBe(true);
     expect(r.value.matches).toHaveLength(1);
     expect(fetchImpl.calls[0].url).toContain("/soccer/fifa.world/scoreboard");
+    expect(fetchImpl.calls[0].url).toContain("?dates=20260613-20260615"); // 不再抓過期預設
   });
 
   it("連線失敗 → ok: false，不丟例外", async () => {

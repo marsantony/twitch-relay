@@ -3,6 +3,24 @@
 // 換資料源時只需要再寫一個回傳同形 snapshot 的 source。
 const BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer";
 
+// ESPN 預設 scoreboard（不帶 dates）會被釘在某個過期日期（實測落後本地約一天），
+// 導致看不到當日 live 比賽。改抓滾動日期範圍 <昨>-<明> 穩定涵蓋此刻在踢的比賽，
+// 不受 ESPN 日期錨點偏移影響；窗口內已完賽的比賽由 diff 引擎靜默基線、不回放。
+export function dateStr(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}${m}${day}`;
+}
+
+export function dateRange(now, backDays = 1, fwdDays = 1) {
+  const start = new Date(now);
+  start.setDate(start.getDate() - backDays);
+  const end = new Date(now);
+  end.setDate(end.getDate() + fwdDays);
+  return `${dateStr(start)}-${dateStr(end)}`;
+}
+
 // ESPN 的 details 事件沒有 id，自行合成去重 key
 export function eventKey(matchId, detail) {
   const athleteId = detail.athletesInvolved?.[0]?.id ?? "na";
@@ -47,10 +65,17 @@ export function normalizeScoreboard(raw) {
   return { matches };
 }
 
-export function createEspnSource({ league, fetchImpl = fetch, timeoutMs = 10000 }) {
-  const url = `${BASE}/${league}/scoreboard`;
+export function createEspnSource({
+  league,
+  fetchImpl = fetch,
+  timeoutMs = 10000,
+  now = () => new Date(),
+}) {
+  const base = `${BASE}/${league}/scoreboard`;
   return {
     async fetchSnapshot() {
+      // 每次 poll 用當下時間重算範圍 → 自動跟著日期滾動，跨午夜不卡住
+      const url = `${base}?dates=${dateRange(now())}`;
       let res;
       try {
         // 加 timeout：長跑 poller 若連線 hang 住，fetch 不會 resolve，backoff 也救不了
