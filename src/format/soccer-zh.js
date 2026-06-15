@@ -30,9 +30,16 @@ function goalFlavor(ev) {
 
 function formatGoal(ev) {
   const m = ev.match;
-  const who = [ev.athlete, goalFlavor(ev)].filter(Boolean).join("，");
+  // 有得分者就掛名字；沒撈到名字就掛得分隊名，避免看不出哪隊進球（比分才是重點）
+  const subject = ev.athlete || (ev.scoringTeamName ? `${ev.scoringTeamName} 得分` : "");
+  const who = [subject, goalFlavor(ev)].filter(Boolean).join("，");
   const suffix = who ? `（${who}）` : "";
   return `⚽ ${ev.clockDisplay} 進球！${m.homeName} ${m.homeScore}-${m.awayScore} ${m.awayName}${suffix}`;
+}
+
+function formatGoalCancelled(ev) {
+  const m = ev.match;
+  return `⚠️ 進球取消（VAR）${m.homeName} ${m.homeScore}-${m.awayScore} ${m.awayName}`;
 }
 
 function formatCard(ev) {
@@ -45,6 +52,7 @@ export function createFormatter({ events = DEFAULT_EVENTS } = {}) {
   const enabled = new Set(events);
   return function formatEvent(ev) {
     if (ev.kind === "goal") return enabled.has("goal") ? formatGoal(ev) : null;
+    if (ev.kind === "goalCancelled") return enabled.has("goal") ? formatGoalCancelled(ev) : null;
     if (ev.kind === "card") return enabled.has("card") ? formatCard(ev) : null;
     if (ev.kind === "status") {
       const type = statusEventType(ev);

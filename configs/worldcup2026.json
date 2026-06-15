@@ -1,5 +1,5 @@
 {
-  "source": { "type": "espn", "league": "fifa.world", "pollIntervalSec": 20 },
+  "source": { "type": "espn", "league": "fifa.world", "pollIntervalSec": 30, "livePollIntervalSec": 10 },
   "format": {
     "type": "soccer-zh",
     "events": ["goal", "card", "kickoff", "halftime", "secondhalf", "fulltime"]

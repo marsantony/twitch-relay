@@ -65,7 +65,12 @@ node src/cli.js run --config configs/worldcup2026.json
 
 ```jsonc
 {
-  "source": { "type": "espn", "league": "fifa.world", "pollIntervalSec": 20 },
+  "source": {
+    "type": "espn",
+    "league": "fifa.world",
+    "pollIntervalSec": 30, // 沒有比賽進行中時的 poll 間隔
+    "livePollIntervalSec": 10 // 有比賽進行中時加速，壓低官方比分的取樣延遲
+  },
   "format": {
     "type": "soccer-zh",
     // 可選：goal, card, kickoff, halftime, secondhalf, fulltime
@@ -75,7 +80,11 @@ node src/cli.js run --config configs/worldcup2026.json
 }
 ```
 
-state（已播報事件、比賽狀態）與頻道清單都存 `~/.config/twitch-relay/`（per-config，不進 repo）。
+**進球以「官方比分變化」觸發**（不是事件 key）：顯示的比分就是 ESPN 官方比分、絕對準確，
+比分單調遞增天生免疫重播；得分者名字從事件清單盡力標註，撈不到就只報比分。
+紅黃牌用穩定事件 key 觸發。比分被 VAR 取消（減少）時會補報「進球取消」。
+
+state（比賽狀態與比分、已播報的牌）與頻道清單都存 `~/.config/twitch-relay/`（per-config，不進 repo）。
 重啟不會重複播報；dry-run 也會寫 state，轉正式跑時不洗版。
 
 ## 技術棧

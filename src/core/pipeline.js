@@ -15,12 +15,13 @@ export function createPipeline({
   loadState,
   saveState,
   logger,
-  pollIntervalSec = 20,
+  pollIntervalSec = 30, // 沒有 live 比賽時的間隔
+  livePollIntervalSec = 10, // 有比賽進行中時加速，壓低官方比分的取樣延遲
   sleepImpl = sleep,
 }) {
   const stats = { polls: 0, pollErrors: 0, sent: 0, dropped: 0, failed: 0 };
 
-  /** 單次 poll。回 { state, error? }，error 表示 source 失敗（state 不變）。 */
+  /** 單次 poll。回 { state, error?, anyLive }，error 表示 source 失敗（state 不變）。 */
   async function tick(state) {
     const snap = await source.fetchSnapshot();
     if (!snap.ok) {
@@ -28,9 +29,9 @@ export function createPipeline({
       return { state, error: snap.error };
     }
     stats.polls++;
+    const anyLive = snap.value.matches.some((m) => m.statusState === "in");
 
-    const { events, warnings, nextState } = diffSnapshot(state, snap.value);
-    for (const w of warnings) logger.warn(w);
+    const { events, nextState } = diffSnapshot(state, snap.value);
 
     let anyFulltime = false;
     for (const ev of events) {
@@ -63,7 +64,7 @@ export function createPipeline({
 
     const w = await saveState(nextState, statePath);
     if (!w.ok) logger.error(`state 寫入失敗：${w.error}`); // 不中斷，但必須可見
-    return { state: nextState };
+    return { state: nextState, anyLive };
   }
 
   async function run({ signal } = {}) {
@@ -80,8 +81,8 @@ export function createPipeline({
         await sleepImpl(backoffSec * 1000);
         backoffSec = Math.min(backoffSec * 2, MAX_BACKOFF_SEC);
       } else {
-        backoffSec = pollIntervalSec;
-        await sleepImpl(pollIntervalSec * 1000);
+        // 有比賽進行中就加速 poll，把官方比分的取樣延遲壓到最低
+        await sleepImpl((t.anyLive ? livePollIntervalSec : pollIntervalSec) * 1000);
       }
     }
     return stats;

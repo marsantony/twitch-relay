@@ -1,10 +1,11 @@
-// snapshot diff → 播報事件。純函式：吃 (state, snapshot) 回 { events, warnings, nextState }，不做 IO。
+// snapshot diff → 播報事件。純函式：吃 (state, snapshot) 回 { events, nextState }，不做 IO。
 //
 // 核心規則：
-// 1. 首次看到的比賽 → 全部事件進 seen 當基線，不播報（腳本開晚了寧漏播不洗版）
-// 2. seen 是 append-only：播過的 key 永不重播（ESPN CDN 抖動時事件可能消失再出現）
-// 3. 事件從快照消失（VAR 取消、資料抖動）→ 只記 warning，不播報
-// 4. 比分變了卻沒有新進球事件 → warning（資料異常的訊號）
+// 1. 首次看到的比賽 → 全部事件進 seen、比分入基線，不播報（開晚了寧漏播不洗版）
+// 2. 進球用「官方比分變化」觸發（不是事件 key）：比分絕對準、單調遞增天生免疫重播。
+//    得分者名字從事件清單盡力撈（撈不到只報比分，因為比分才是重點）。
+// 3. 紅黃牌用穩定事件 key 觸發、append-only 去重（ESPN 抖動/重分類不重播）
+// 4. 比分減少（VAR 取消）→ 播 goalCancelled，讓比分始終如實
 
 export function emptyState() {
   return { seenEventKeys: {}, matches: {} };
@@ -12,11 +13,11 @@ export function emptyState() {
 
 export function diffSnapshot(state, snapshot) {
   const events = [];
-  const warnings = [];
   const nextState = {
     seenEventKeys: { ...state.seenEventKeys },
     matches: { ...state.matches },
   };
+  const seen = nextState.seenEventKeys;
 
   for (const match of snapshot.matches) {
     const prev = state.matches[match.id];
@@ -28,12 +29,14 @@ export function diffSnapshot(state, snapshot) {
       displayClock: match.displayClock,
     };
 
+    // 基線：首見的比賽記下全部事件與比分，不播報
     if (!prev) {
-      for (const ev of match.events) nextState.seenEventKeys[ev.key] = true;
+      for (const ev of match.events) seen[ev.key] = true;
       nextState.matches[match.id] = toMatchState(match);
       continue;
     }
 
+    // 狀態轉換（開賽/中場/下半場/完場）
     if (prev.statusName !== match.statusName) {
       events.push({
         kind: "status",
@@ -45,38 +48,66 @@ export function diffSnapshot(state, snapshot) {
       });
     }
 
-    let newGoals = 0;
+    // 進球：比分變化觸發
+    emitGoalsForSide(events, match, prev, seen, "home", matchInfo);
+    emitGoalsForSide(events, match, prev, seen, "away", matchInfo);
+
+    // 紅黃牌：穩定 key 觸發。進球事件不在此處理（留給比分觸發時當得分者撈），但也不在此標記，
+    // 以免 event-before-score 時被提前標記、之後比分追上卻撈不到得分者。
     for (const ev of match.events) {
-      if (nextState.seenEventKeys[ev.key]) continue;
-      nextState.seenEventKeys[ev.key] = true;
-      if (ev.scoringPlay) {
-        newGoals++;
-        events.push({ kind: "goal", ...ev, match: matchInfo });
-      } else if (ev.yellowCard || ev.redCard) {
+      if (seen[ev.key] || ev.scoringPlay) continue;
+      seen[ev.key] = true;
+      if (ev.yellowCard || ev.redCard) {
         events.push({ kind: "card", ...ev, match: matchInfo });
       }
       // 其他事件種類（換人等）目前不播報
     }
 
-    const currentKeys = new Set(match.events.map((ev) => ev.key));
-    for (const key of prev.lastEventKeys) {
-      if (!currentKeys.has(key)) {
-        warnings.push(`事件從快照消失（VAR 取消或資料抖動）：${key}`);
-      }
-    }
-
-    const scoreChanged =
-      prev.homeScore !== match.home.score || prev.awayScore !== match.away.score;
-    if (scoreChanged && newGoals === 0) {
-      warnings.push(
-        `比分變化但無對應進球事件：${match.home.name} ${match.home.score}-${match.away.score} ${match.away.name}`,
-      );
-    }
-
     nextState.matches[match.id] = toMatchState(match);
   }
 
-  return { events, warnings, nextState };
+  return { events, nextState };
+}
+
+// 某隊比分增加 → 為每個增量播一則進球；減少 → 播進球取消（VAR）。
+function emitGoalsForSide(events, match, prev, seen, side, matchInfo) {
+  const cur = side === "home" ? match.home.score : match.away.score;
+  const before = side === "home" ? prev.homeScore : prev.awayScore;
+
+  if (cur < before) {
+    events.push({ kind: "goalCancelled", side, match: matchInfo });
+    return;
+  }
+  const teamName = side === "home" ? match.home.name : match.away.name;
+  for (let i = 0; i < cur - before; i++) {
+    const ev = pickScorer(match, side, seen);
+    if (ev) seen[ev.key] = true; // 標記為已命名，避免重複撈
+    events.push({
+      kind: "goal",
+      side,
+      scoringTeamName: teamName,
+      clockDisplay: ev?.clockDisplay || match.displayClock || "",
+      typeText: ev?.typeText ?? "",
+      athlete: ev?.athlete ?? "",
+      penaltyKick: ev?.penaltyKick ?? false,
+      ownGoal: ev?.ownGoal ?? false,
+      shootout: ev?.shootout ?? false,
+      match: matchInfo, // 比分用官方當下值（正確）
+    });
+  }
+}
+
+// 盡力找這次進球的得分者事件：先找該隊未命名的正常進球，退而求其次任何未命名的進球事件
+//（涵蓋烏龍球、ESPN teamId 慣例不確定的情況）。找不到回 null（只報比分、不掛得分者）。
+function pickScorer(match, side, seen) {
+  const sideId = side === "home" ? match.home.id : match.away.id;
+  return (
+    match.events.find(
+      (e) => e.scoringPlay && !seen[e.key] && !e.ownGoal && e.teamId === sideId,
+    ) ||
+    match.events.find((e) => e.scoringPlay && !seen[e.key]) ||
+    null
+  );
 }
 
 function toMatchState(match) {
@@ -85,6 +116,5 @@ function toMatchState(match) {
     statusName: match.statusName,
     homeScore: match.home.score,
     awayScore: match.away.score,
-    lastEventKeys: match.events.map((ev) => ev.key),
   };
 }

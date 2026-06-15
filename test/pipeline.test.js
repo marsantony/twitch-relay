@@ -112,7 +112,7 @@ describe("pipeline tick", () => {
         {
           ok: true,
           value: {
-            matches: [makeMatch({ home: 1, events: [GOAL, { ...GOAL, key: "k2", athlete: "球員B" }] })],
+            matches: [makeMatch({ home: 2, events: [GOAL, { ...GOAL, key: "k2", athlete: "球員B" }] })],
           },
         },
       ],
@@ -152,6 +152,20 @@ describe("pipeline tick", () => {
   });
 });
 
+describe("pipeline tick anyLive", () => {
+  it("有進行中比賽 → anyLive true；全部非進行中 → false", async () => {
+    const live = fakeWorld({ snapshots: [{ ok: true, value: { matches: [makeMatch({ state: "in" })] } }] });
+    const p1 = createPipeline({ ...live, formatEvent: createFormatter(), statePath: "/f" });
+    expect((await p1.tick(emptyState())).anyLive).toBe(true);
+
+    const idle = fakeWorld({
+      snapshots: [{ ok: true, value: { matches: [makeMatch({ state: "post" })] } }],
+    });
+    const p2 = createPipeline({ ...idle, formatEvent: createFormatter(), statePath: "/f" });
+    expect((await p2.tick(emptyState())).anyLive).toBe(false);
+  });
+});
+
 describe("pipeline run", () => {
   it("loadState 損壞 → fail loud，不靜默清空", async () => {
     const world = fakeWorld({ snapshots: [] });
@@ -162,5 +176,30 @@ describe("pipeline run", () => {
       statePath: "/fake/state.json",
     });
     await expect(pipeline.run({})).rejects.toThrow(/state 檔損壞/);
+  });
+
+  it("有 live 比賽用 livePollIntervalSec、無 live 用 pollIntervalSec", async () => {
+    const runOnce = async (state) => {
+      const sleeps = [];
+      const signal = { aborted: false };
+      const world = fakeWorld({
+        snapshots: [{ ok: true, value: { matches: [makeMatch({ state })] } }],
+      });
+      const pipeline = createPipeline({
+        ...world,
+        formatEvent: createFormatter(),
+        statePath: "/f",
+        pollIntervalSec: 30,
+        livePollIntervalSec: 10,
+        sleepImpl: async (ms) => {
+          sleeps.push(ms);
+          signal.aborted = true; // 跑一輪就停
+        },
+      });
+      await pipeline.run({ signal });
+      return sleeps[0];
+    };
+    expect(await runOnce("in")).toBe(10000); // live → 10s
+    expect(await runOnce("post")).toBe(30000); // idle → 30s
   });
 });

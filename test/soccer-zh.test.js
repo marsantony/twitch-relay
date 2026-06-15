@@ -33,6 +33,15 @@ describe("soccer-zh formatter", () => {
     expect(format(goal({ penaltyKick: true, shootout: true }))).toContain("PK 戰");
   });
 
+  it("撈不到得分者 → 掛得分隊名（比分仍正確）", () => {
+    const noScorer = goal({ athlete: "", scoringTeamName: "墨西哥" });
+    expect(format(noScorer)).toBe("⚽ 33' 進球！墨西哥 1-0 南非（墨西哥 得分）");
+  });
+
+  it("goalCancelled → 進球取消（VAR）含當下比分", () => {
+    expect(format({ kind: "goalCancelled", match })).toBe("⚠️ 進球取消（VAR）墨西哥 1-0 南非");
+  });
+
   it("黃牌與紅牌", () => {
     const card = goal({ kind: "card", yellowCard: true, scoringPlay: false, clockDisplay: "45'+3'" });
     expect(format(card)).toBe("🟨 黃牌 45'+3' 球員A｜墨西哥 vs 南非");

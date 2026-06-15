@@ -165,7 +165,8 @@ async function cmdRun({ config: configPath, dryRun, channel, state: stateOverrid
     loadState,
     saveState,
     logger,
-    pollIntervalSec: config.source?.pollIntervalSec ?? 20,
+    pollIntervalSec: config.source?.pollIntervalSec ?? 30,
+    livePollIntervalSec: config.source?.livePollIntervalSec ?? 10,
   });
   await pipeline.run({});
 }
