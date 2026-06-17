@@ -21,143 +21,122 @@ function makeMatch({
   };
 }
 
-function goalEvent(key, overrides = {}) {
-  return {
-    key,
-    typeId: "70",
-    typeText: "Goal",
-    clockDisplay: "12'",
-    teamId: "h",
-    scoringPlay: true,
-    yellowCard: false,
-    redCard: false,
-    penaltyKick: false,
-    ownGoal: false,
-    shootout: false,
-    athlete: "球員A",
-    ...overrides,
-  };
+// 進球事件（只有 scoringPlay 與 key 重要；得分者欄位已不使用）
+function goalEvent(key) {
+  return { key, scoringPlay: true, yellowCard: false, redCard: false };
 }
-
-function cardEvent(key, overrides = {}) {
-  return goalEvent(key, { scoringPlay: false, yellowCard: true, typeId: "94", ...overrides });
+function cardEvent(key) {
+  return { key, scoringPlay: false, yellowCard: true, redCard: false, clockDisplay: "20'", athlete: "X" };
+}
+// n 顆進球事件（讓 score 與事件數自洽）
+function goals(n) {
+  return Array.from({ length: n }, (_, i) => goalEvent("g" + i));
 }
 
 function baseline(match) {
   return diffSnapshot(emptyState(), { matches: [match] }).nextState;
 }
+function goalsOf(r) {
+  return r.events.filter((e) => e.kind === "goal");
+}
 
-describe("diffSnapshot — 進球用比分觸發", () => {
-  it("首見比賽當基線：不播報、比分入基線", () => {
-    const snap = { matches: [makeMatch({ home: 1, events: [goalEvent("k1")] })] };
-    const { events, nextState } = diffSnapshot(emptyState(), snap);
-    expect(events).toEqual([]);
-    expect(nextState.matches.m1.homeScore).toBe(1);
+describe("diffSnapshot — 進球（比分觸發、不掛得分者）", () => {
+  it("首見比賽當基線：不播報", () => {
+    const r = diffSnapshot(emptyState(), { matches: [makeMatch({ home: 1, events: goals(1) })] });
+    expect(r.events).toEqual([]);
+    expect(r.nextState.matches.m1.homeScore).toBe(1);
   });
 
-  it("比分增加 → 播一次進球（含得分者與正確比分）；同快照再 diff 不重播", () => {
+  it("自洽且比分上升 → 播一則進球（只帶得分隊+比分，無得分者）；同快照不重播", () => {
     const s1 = baseline(makeMatch());
-    const withGoal = { matches: [makeMatch({ home: 1, events: [goalEvent("k1")] })] };
-    const r2 = diffSnapshot(s1, withGoal);
-    const goals = r2.events.filter((e) => e.kind === "goal");
-    expect(goals).toHaveLength(1);
-    expect(goals[0].side).toBe("home");
-    expect(goals[0].athlete).toBe("球員A");
-    expect(goals[0].match.homeScore).toBe(1);
-
-    const r3 = diffSnapshot(r2.nextState, withGoal); // 比分沒再變
-    expect(r3.events.filter((e) => e.kind === "goal")).toEqual([]);
+    const snap = { matches: [makeMatch({ home: 1, events: goals(1) })] };
+    const r2 = diffSnapshot(s1, snap);
+    expect(goalsOf(r2)).toHaveLength(1);
+    expect(r2.events[0]).toMatchObject({ kind: "goal", side: "home", scoringTeamName: "主隊" });
+    expect(r2.events[0].athlete).toBeUndefined(); // 不掛得分者
+    expect(r2.events[0].match.homeScore).toBe(1);
+    expect(goalsOf(diffSnapshot(r2.nextState, snap))).toEqual([]); // 比分沒變不重播
   });
 
-  it("比分晚到：事件先出現(比分未動)不播 → 比分追上才播並掛上得分者", () => {
-    const s1 = baseline(makeMatch()); // 0-0
-    // poll A：進球事件已在 details，但官方比分還是 0-0（ESPN 晚到）
-    const eventFirst = { matches: [makeMatch({ home: 0, events: [goalEvent("k1")] })] };
-    const rA = diffSnapshot(s1, eventFirst);
-    expect(rA.events.filter((e) => e.kind === "goal")).toEqual([]); // 不播
-
-    // poll B：比分追上 1-0
-    const scoreCaughtUp = { matches: [makeMatch({ home: 1, events: [goalEvent("k1")] })] };
-    const rB = diffSnapshot(rA.nextState, scoreCaughtUp);
-    const goals = rB.events.filter((e) => e.kind === "goal");
-    expect(goals).toHaveLength(1);
-    expect(goals[0].athlete).toBe("球員A"); // 得分者撈得到
-    expect(goals[0].match.homeScore).toBe(1);
+  it("不自洽（比分歸 0 但事件還在）→ 不播、沿用 confirmed；彈回後也不補播", () => {
+    const s1 = baseline(makeMatch({ home: 1, away: 1, events: goals(2) })); // 基線 1-1, 2 事件
+    // 抖動：比分 0-0 但 2 個進球事件還在 → total 0 ≠ count 2 → 不自洽
+    const glitch = { matches: [makeMatch({ home: 0, away: 0, events: goals(2) })] };
+    const rG = diffSnapshot(s1, glitch);
+    expect(rG.events).toEqual([]); // 不播取消、不播進球
+    expect(rG.nextState.matches.m1.homeScore).toBe(1); // 沿用 confirmed
+    expect(rG.nextState.matches.m1.awayScore).toBe(1);
+    // 彈回 1-1（== confirmed）→ 無事
+    const rBack = diffSnapshot(rG.nextState, { matches: [makeMatch({ home: 1, away: 1, events: goals(2) })] });
+    expect(rBack.events).toEqual([]);
   });
 
-  it("重播免疫：比分不變、但事件 key 被 ESPN 改 → 不重播", () => {
-    const s1 = baseline(makeMatch());
-    const r2 = diffSnapshot(s1, { matches: [makeMatch({ home: 1, events: [goalEvent("k1")] })] });
-    expect(r2.events.filter((e) => e.kind === "goal")).toHaveLength(1);
-    // 下一次 poll：比分仍 1-0，但同一顆進球被 ESPN re-key 成 k2
-    const r3 = diffSnapshot(r2.nextState, {
-      matches: [makeMatch({ home: 1, events: [goalEvent("k2")] })],
-    });
-    expect(r3.events.filter((e) => e.kind === "goal")).toEqual([]); // 比分沒變就不播
+  it("全清空型抖動（0-0 且事件也空，湊巧自洽）→ 形狀守門擋掉（兩隊降）", () => {
+    const s1 = baseline(makeMatch({ home: 1, away: 1, events: goals(2) }));
+    const reset = { matches: [makeMatch({ home: 0, away: 0, events: [] })] }; // 0==0 自洽，但降 2 球
+    const r = diffSnapshot(s1, reset);
+    expect(r.events).toEqual([]); // 不播
+    expect(r.nextState.matches.m1.homeScore).toBe(1); // 沿用 confirmed
   });
 
-  it("客隊進球 → side=away", () => {
-    const s1 = baseline(makeMatch());
-    const r = diffSnapshot(s1, {
-      matches: [makeMatch({ away: 1, events: [goalEvent("k1", { teamId: "a", athlete: "客員B" })] })],
-    });
-    const goals = r.events.filter((e) => e.kind === "goal");
-    expect(goals).toHaveLength(1);
-    expect(goals[0].side).toBe("away");
-    expect(goals[0].athlete).toBe("客員B");
-  });
-
-  it("一個 poll 內比分 +2（兩球）→ 播兩則", () => {
-    const s1 = baseline(makeMatch());
-    const r = diffSnapshot(s1, {
-      matches: [
-        makeMatch({ home: 2, events: [goalEvent("k1", { athlete: "A" }), goalEvent("k2", { athlete: "B" })] }),
-      ],
-    });
-    expect(r.events.filter((e) => e.kind === "goal")).toHaveLength(2);
-  });
-
-  it("撈不到得分者事件（比分先到）→ 仍播進球、掛得分隊名、athlete 空", () => {
-    const s1 = baseline(makeMatch());
-    const r = diffSnapshot(s1, { matches: [makeMatch({ home: 1, events: [] })] });
-    const goals = r.events.filter((e) => e.kind === "goal");
-    expect(goals).toHaveLength(1);
-    expect(goals[0].athlete).toBe("");
-    expect(goals[0].scoringTeamName).toBe("主隊");
-  });
-
-  it("VAR 取消：比分減少 → goalCancelled", () => {
-    const s1 = baseline(makeMatch({ home: 1, events: [goalEvent("k1")] })); // 基線 1-0
-    const r = diffSnapshot(s1, { matches: [makeMatch({ home: 0, events: [] })] });
+  it("真 VAR：單側剛好 -1 且自洽 → 播 goalCancelled", () => {
+    const s1 = baseline(makeMatch({ home: 2, away: 1, events: goals(3) })); // 基線 2-1, 3 事件
+    const var1 = { matches: [makeMatch({ home: 1, away: 1, events: goals(2) })] }; // 1-1, 2 事件，降 1
+    const r = diffSnapshot(s1, var1);
     expect(r.events.some((e) => e.kind === "goalCancelled" && e.side === "home")).toBe(true);
+    expect(r.nextState.matches.m1.homeScore).toBe(1);
+  });
+
+  it("比分晚到：事件先到(不自洽)不播 → 比分追上(自洽)才播", () => {
+    const s1 = baseline(makeMatch()); // 0-0, 0 事件
+    const eventFirst = { matches: [makeMatch({ home: 0, events: goals(1) })] }; // 0 分但 1 事件 → 不自洽
+    const rA = diffSnapshot(s1, eventFirst);
+    expect(goalsOf(rA)).toEqual([]);
+    const scoreUp = { matches: [makeMatch({ home: 1, events: goals(1) })] }; // 1 分 1 事件 → 自洽
+    const rB = diffSnapshot(rA.nextState, scoreUp);
+    expect(goalsOf(rB)).toHaveLength(1);
+  });
+
+  it("一個 poll 內比分 +2（自洽）→ 播兩則", () => {
+    const s1 = baseline(makeMatch());
+    const r = diffSnapshot(s1, { matches: [makeMatch({ home: 2, events: goals(2) })] });
+    expect(goalsOf(r)).toHaveLength(2);
+  });
+
+  it("客隊進球 → side=away、得分隊=客隊", () => {
+    const s1 = baseline(makeMatch());
+    const r = diffSnapshot(s1, { matches: [makeMatch({ away: 1, events: goals(1) })] });
+    expect(goalsOf(r)[0]).toMatchObject({ side: "away", scoringTeamName: "客隊" });
+  });
+
+  it("state 經 JSON 序列化重啟後不重播", () => {
+    const snap = { matches: [makeMatch({ home: 1, events: goals(1) })] };
+    const s1 = diffSnapshot(emptyState(), snap).nextState;
+    const restored = JSON.parse(JSON.stringify(s1));
+    expect(goalsOf(diffSnapshot(restored, snap))).toEqual([]);
   });
 });
 
-describe("diffSnapshot — 紅黃牌仍用事件 key", () => {
-  it("黃牌 → card；換人(非進球非牌)不播", () => {
-    const s1 = baseline(makeMatch());
-    const next = {
-      matches: [
-        makeMatch({
-          events: [cardEvent("k-card"), goalEvent("k-sub", { scoringPlay: false, typeText: "Substitution" })],
-        }),
-      ],
-    };
-    const r = diffSnapshot(s1, next);
-    expect(r.events.filter((e) => e.kind === "card")).toHaveLength(1);
-  });
-
-  it("同一張牌 key 不變 → 不重播", () => {
+describe("diffSnapshot — 紅黃牌（事件 key 觸發，與自洽性無關）", () => {
+  it("黃牌 → card；同 key 不重播", () => {
     const s1 = baseline(makeMatch());
     const snap = { matches: [makeMatch({ events: [cardEvent("kc")] })] };
     const r2 = diffSnapshot(s1, snap);
     expect(r2.events.filter((e) => e.kind === "card")).toHaveLength(1);
-    const r3 = diffSnapshot(r2.nextState, snap);
-    expect(r3.events.filter((e) => e.kind === "card")).toEqual([]);
+    expect(diffSnapshot(r2.nextState, snap).events.filter((e) => e.kind === "card")).toEqual([]);
+  });
+
+  it("不自洽的 poll 仍照常處理紅黃牌", () => {
+    const s1 = baseline(makeMatch({ home: 1, events: goals(1) })); // 1-0 自洽基線
+    // 比分歸 0（不自洽）但同時來一張黃牌 → 牌照播、比分守住
+    const snap = { matches: [makeMatch({ home: 0, events: [goalEvent("g0"), cardEvent("kc")] })] };
+    const r = diffSnapshot(s1, snap);
+    expect(r.events.filter((e) => e.kind === "card")).toHaveLength(1);
+    expect(r.nextState.matches.m1.homeScore).toBe(1); // 比分沿用 confirmed
   });
 });
 
-describe("diffSnapshot — 狀態與其他", () => {
+describe("diffSnapshot — 狀態與多場", () => {
   it("狀態轉換 pre→in、in→post", () => {
     const s1 = baseline(makeMatch({ state: "pre", name: "STATUS_SCHEDULED" }));
     const r2 = diffSnapshot(s1, { matches: [makeMatch({ state: "in", name: "STATUS_FIRST_HALF" })] });
@@ -165,17 +144,9 @@ describe("diffSnapshot — 狀態與其他", () => {
       expect.objectContaining({ kind: "status", prevState: "pre", newState: "in" }),
     );
     const r3 = diffSnapshot(r2.nextState, {
-      matches: [makeMatch({ state: "post", name: "STATUS_FULL_TIME", home: 0 })],
+      matches: [makeMatch({ state: "post", name: "STATUS_FULL_TIME" })],
     });
     expect(r3.events.find((e) => e.kind === "status").newState).toBe("post");
-  });
-
-  it("state 經 JSON 序列化重啟後不重播", () => {
-    const withGoal = { matches: [makeMatch({ home: 1, events: [goalEvent("k1")] })] };
-    const s1 = diffSnapshot(emptyState(), withGoal).nextState; // 基線 1-0
-    const restored = JSON.parse(JSON.stringify(s1));
-    const r = diffSnapshot(restored, withGoal);
-    expect(r.events.filter((e) => e.kind === "goal")).toEqual([]);
   });
 
   it("多場比賽互不干擾", () => {
@@ -185,12 +156,11 @@ describe("diffSnapshot — 狀態與其他", () => {
     const s1 = diffSnapshot(emptyState(), both).nextState;
     const r = diffSnapshot(s1, {
       matches: [
-        makeMatch({ id: "m1", home: 1, events: [goalEvent("g")] }),
+        makeMatch({ id: "m1", home: 1, events: goals(1) }),
         makeMatch({ id: "m2", state: "pre", name: "STATUS_SCHEDULED" }),
       ],
     });
-    const goals = r.events.filter((e) => e.kind === "goal");
-    expect(goals).toHaveLength(1);
-    expect(goals[0].match.homeName).toBe("主隊");
+    expect(goalsOf(r)).toHaveLength(1);
+    expect(goalsOf(r)[0].match.homeName).toBe("主隊");
   });
 });

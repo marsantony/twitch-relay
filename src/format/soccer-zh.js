@@ -19,21 +19,10 @@ function statusEventType(ev) {
   return null;
 }
 
-function goalFlavor(ev) {
-  if (ev.ownGoal) return "烏龍球";
-  if (ev.shootout) return "PK 戰";
-  if (ev.penaltyKick) return "12 碼";
-  if (ev.typeText.includes("Header")) return "頭球";
-  if (ev.typeText.includes("Free")) return "自由球";
-  return "";
-}
-
 function formatGoal(ev) {
   const m = ev.match;
-  // 有得分者就掛名字；沒撈到名字就掛得分隊名，避免看不出哪隊進球（比分才是重點）
-  const subject = ev.athlete || (ev.scoringTeamName ? `${ev.scoringTeamName} 得分` : "");
-  const who = [subject, goalFlavor(ev)].filter(Boolean).join("，");
-  const suffix = who ? `（${who}）` : "";
+  // 只報比分 + 得分隊（不掛得分者，名字不可靠不如不放；比分才是重點）
+  const suffix = ev.scoringTeamName ? `（${ev.scoringTeamName} 得分）` : "";
   return `⚽ ${ev.clockDisplay} 進球！${m.homeName} ${m.homeScore}-${m.awayScore} ${m.awayName}${suffix}`;
 }
 

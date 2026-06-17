@@ -86,7 +86,7 @@ describe("pipeline tick", () => {
     expect(world.sentMessages).toHaveLength(1);
     expect(world.sentMessages[0]).toContain("進球");
     expect(t2.error).toBeUndefined();
-    expect(world.getSaved().seenEventKeys.k1).toBe(true);
+    expect(world.getSaved().matches.m1.homeScore).toBe(1); // 比分已確認落地
     expect(pipeline.stats.sent).toBe(1);
   });
 
